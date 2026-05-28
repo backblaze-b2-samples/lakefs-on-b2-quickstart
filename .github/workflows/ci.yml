@@ -1,0 +1,131 @@
+name: Quickstart smoke test
+
+# Brings up the stack against backblaze-samples-ci and runs a lakectl round-trip.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: docker compose up + lakectl round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.CI_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.CI_APP_KEY }}
+      AWS_ENDPOINT_URL: https://s3.us-east-005.backblazeb2.com
+      AWS_DEFAULT_REGION: us-east-005
+      B2_LAKEFS_DATA_BUCKET: backblaze-samples-ci
+      LAKEFS_ADMIN_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+      LAKEFS_ADMIN_SECRET_ACCESS_KEY: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+      POSTGRES_USER: lakefs
+      POSTGRES_PASSWORD: lakefs
+      POSTGRES_DB: lakefs
+      # Per-run repo + storage prefix so concurrent runs cannot collide.
+      CI_REPO_NAME: ci-lakefs-${{ github.run_id }}-${{ github.run_attempt }}
+      CI_STORAGE_NAMESPACE: s3://backblaze-samples-ci/ci/lakefs-b2/run-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render .env from CI env (mirrors what a real user would do)
+        run: |
+          {
+            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            echo "AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL}"
+            echo "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
+            echo "B2_LAKEFS_DATA_BUCKET=${B2_LAKEFS_DATA_BUCKET}"
+            echo "LAKEFS_ADMIN_ACCESS_KEY_ID=${LAKEFS_ADMIN_ACCESS_KEY_ID}"
+            echo "LAKEFS_ADMIN_SECRET_ACCESS_KEY=${LAKEFS_ADMIN_SECRET_ACCESS_KEY}"
+            echo "POSTGRES_USER=${POSTGRES_USER}"
+            echo "POSTGRES_PASSWORD=${POSTGRES_PASSWORD}"
+            echo "POSTGRES_DB=${POSTGRES_DB}"
+          } > .env
+
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Start the stack
+        run: docker compose up -d
+
+      - name: Wait for lakeFS to be healthy
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/_health >/dev/null; then
+              echo "lakeFS healthy after ${i} tries."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::lakeFS did not become healthy in 120s. Logs follow."
+          docker compose logs lakefs
+          exit 1
+
+      - name: Install lakectl
+        run: |
+          LAKEFS_VERSION=1.34.0
+          curl -fsSL "https://github.com/treeverse/lakeFS/releases/download/v${LAKEFS_VERSION}/lakeFS_${LAKEFS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz -C /tmp lakectl
+          sudo mv /tmp/lakectl /usr/local/bin/lakectl
+          lakectl --version
+
+      - name: Configure lakectl
+        run: |
+          mkdir -p "$HOME/.lakectl"
+          cat > "$HOME/.lakectl.yaml" <<EOF
+          credentials:
+            access_key_id: ${LAKEFS_ADMIN_ACCESS_KEY_ID}
+            secret_access_key: ${LAKEFS_ADMIN_SECRET_ACCESS_KEY}
+          server:
+            endpoint_url: http://localhost:8000
+          EOF
+
+      - name: Round-trip (create repo, branch, commit, diff, merge)
+        run: |
+          set -e
+          REPO="lakefs://${CI_REPO_NAME}"
+
+          lakectl repo create "${REPO}" "${CI_STORAGE_NAMESPACE}" --default-branch main
+
+          echo "version 1" > /tmp/hello.txt
+          lakectl fs upload -s /tmp/hello.txt "${REPO}/main/hello.txt"
+          lakectl commit "${REPO}/main" -m "initial hello"
+
+          lakectl branch create "${REPO}/experiment" --source "${REPO}/main"
+          echo "version 2" > /tmp/hello.txt
+          lakectl fs upload -s /tmp/hello.txt "${REPO}/experiment/hello.txt"
+          lakectl commit "${REPO}/experiment" -m "update hello"
+
+          lakectl diff "${REPO}/main" "${REPO}/experiment"
+          lakectl merge "${REPO}/experiment" "${REPO}/main"
+
+          lakectl fs cat "${REPO}/main/hello.txt" > /tmp/merged.txt
+          diff /tmp/merged.txt /tmp/hello.txt
+          echo "Round-trip OK."
+
+      - name: Tear down the stack
+        if: always()
+        run: docker compose down -v
+
+      - name: Cleanup CI lakeFS data from B2 (always, even on failure)
+        if: always()
+        run: |
+          pip install --quiet awscli
+          aws s3 rm \
+            "${CI_STORAGE_NAMESPACE}/" \
+            --recursive \
+            --endpoint-url "${AWS_ENDPOINT_URL}" \
+            || echo "::warning::Cleanup partial; bucket lifecycle rule will handle the rest."

@@ -160,10 +160,19 @@ Postgres is not published to the host by default in this sample (containers reac
 
 ### lakeFS UI says "first-time setup" rather than letting me log in
 
-The `LAKEFS_INSTALLATION_*` env vars are evaluated only on the very first lakeFS startup against an empty Postgres database. If you previously started lakeFS without those vars set, the UI runs its interactive setup wizard. Two fixes:
+The bundled `lakefs-setup` helper service handles the one-time `/api/v1/setup_lakefs` call automatically when the stack first starts. If you see the setup wizard, the helper either has not run yet or it failed. Check its logs:
 
-* Run the setup wizard once, choose your own admin credentials, and skip the env-var path.
-* Or: `docker compose down -v` to drop the Postgres volume, then `docker compose up -d` again so lakeFS sees an empty DB on first start and honors the `LAKEFS_INSTALLATION_*` values.
+```bash
+docker compose logs lakefs-setup
+```
+
+A clean run prints `lakeFS setup OK (HTTP 200)`. A repeat run (after `docker compose restart`) prints `lakeFS setup OK (HTTP 409)`, because lakeFS is already initialized. Anything else, the admin credentials in `.env` are not yet usable; rerun the setup curl manually:
+
+```bash
+curl -sS -X POST http://localhost:8000/api/v1/setup_lakefs \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"admin\",\"key\":{\"access_key_id\":\"${LAKEFS_ADMIN_ACCESS_KEY_ID}\",\"secret_access_key\":\"${LAKEFS_ADMIN_SECRET_ACCESS_KEY}\"}}"
+```
 
 ### Verifying that B2 sees a `lakefs/<version>` `User-Agent`
 
