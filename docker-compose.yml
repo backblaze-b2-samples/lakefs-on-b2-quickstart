@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lakefs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lakefs}
+      POSTGRES_DB: ${POSTGRES_DB:-lakefs}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lakefs} -d ${POSTGRES_DB:-lakefs}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  lakefs:
+    image: treeverse/lakefs:1.34
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      # Database (Postgres KV)
+      LAKEFS_DATABASE_TYPE: postgres
+      LAKEFS_DATABASE_POSTGRES_CONNECTION_STRING: "postgres://${POSTGRES_USER:-lakefs}:${POSTGRES_PASSWORD:-lakefs}@postgres:5432/${POSTGRES_DB:-lakefs}?sslmode=disable"
+
+      # Blockstore: B2 via the S3-compatible API
+      LAKEFS_BLOCKSTORE_TYPE: s3
+      LAKEFS_BLOCKSTORE_S3_ENDPOINT: ${AWS_ENDPOINT_URL}
+      LAKEFS_BLOCKSTORE_S3_REGION: ${AWS_DEFAULT_REGION}
+      LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE: "true"
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      # Use pre-signed URLs for client downloads so the lakeFS server does not
+      # proxy bytes. Required for the Python SDK's high-throughput upload path.
+      LAKEFS_BLOCKSTORE_S3_PRE_SIGNED_ENDPOINT: ${AWS_ENDPOINT_URL}
+
+      # First-run bootstrap: create an admin user with the credentials from .env
+      # so the web UI and lakectl can sign in immediately, without an interactive
+      # setup wizard.
+      LAKEFS_INSTALLATION_USER_NAME: admin
+      LAKEFS_INSTALLATION_ACCESS_KEY_ID: ${LAKEFS_ADMIN_ACCESS_KEY_ID}
+      LAKEFS_INSTALLATION_SECRET_ACCESS_KEY: ${LAKEFS_ADMIN_SECRET_ACCESS_KEY}
+
+      # Auth secret. Generated once and reused across restarts. The value
+      # below is fine for localhost; rotate before exposing the API publicly.
+      LAKEFS_AUTH_ENCRYPT_SECRET_KEY: "lakefs-on-b2-quickstart-localhost-only-do-not-reuse"
+
+      # Quieter startup logging for the demo.
+      LAKEFS_LOGGING_LEVEL: INFO
+    command: ["run"]
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8000/_health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres-data:

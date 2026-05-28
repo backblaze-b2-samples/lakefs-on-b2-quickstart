@@ -1,0 +1,6 @@
+.env
+.DS_Store
+*.swp
+*.tmp
+__pycache__/
+postgres-data/
