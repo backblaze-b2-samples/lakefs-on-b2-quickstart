@@ -37,7 +37,7 @@ jobs:
       CI_STORAGE_NAMESPACE: s3://backblaze-samples-ci/ci/lakefs-b2/run-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Render .env from CI env (mirrors what a real user would do)
         run: |
